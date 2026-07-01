@@ -9,7 +9,7 @@ import {
 } from "discord.js";
 import { commands } from "./commands.js";
 import { fetchProduct, summarizeProduct } from "./displaycatalog.js";
-import { fetchXspHeaderBytes, parseXspHeader } from "./xsp.js";
+import { analyzeXspFile } from "./xsp.js";
 
 const token = process.env.DISCORD_TOKEN;
 const clientId = process.env.DISCORD_CLIENT_ID;
@@ -119,10 +119,14 @@ function formatBytes(bytes) {
   return `${rounded} ${units[exp]} (${bytes.toLocaleString("en-US")} bytes)`;
 }
 
-function buildXspEmbed(header, attachment) {
-  return new EmbedBuilder()
+function buildXspEmbed(header, stats, attachment) {
+  const pct = (n) => `${(n * 100).toFixed(1)}%`;
+  const reusePct = pct(stats.reuseRatio);
+  const downloadPct = pct(1 - stats.reuseRatio);
+
+  const embed = new EmbedBuilder()
     .setColor(0x107c10)
-    .setTitle(`XSP header — ${attachment.name}`)
+    .setTitle(`XSP file — ${attachment.name}`)
     .setDescription(`Magic: \`${header.magic}\``)
     .addFields(
       {
@@ -136,18 +140,8 @@ function buildXspEmbed(header, attachment) {
         inline: true,
       },
       {
-        name: "Elements",
-        value: `\`${header.numberOfElements.toLocaleString("en-US")}\``,
-        inline: true,
-      },
-      {
-        name: "Page size",
+        name: "Block size",
         value: `\`${formatBytes(header.pageSize)}\``,
-        inline: true,
-      },
-      {
-        name: "Total download",
-        value: `\`${formatBytes(header.totalDownload)}\``,
         inline: true,
       },
       {
@@ -156,9 +150,14 @@ function buildXspEmbed(header, attachment) {
         inline: true,
       },
       {
-        name: "Next block size",
-        value: `\`${formatBytes(header.nextBlockSize)}\``,
-        inline: true,
+        name: `Re-used from install (${reusePct})`,
+        value: `\`${formatBytes(stats.reusedBytes)}\` · ${stats.copyCount.toLocaleString("en-US")} record(s)`,
+        inline: false,
+      },
+      {
+        name: `Downloaded (${downloadPct})`,
+        value: `\`${formatBytes(stats.downloadedBytes)}\` · ${stats.newCount.toLocaleString("en-US")} record(s)`,
+        inline: false,
       },
       {
         name: "Content ID (VDUID)",
@@ -173,10 +172,18 @@ function buildXspEmbed(header, attachment) {
       { name: "Build ID", value: `\`${header.buildId}\``, inline: false },
       { name: "Plan ID", value: `\`${header.planId}\``, inline: false },
       { name: "XSP ID", value: `\`${header.xspId}\``, inline: false },
-    )
-    .setFooter({
-      text: `File size: ${formatBytes(attachment.size)} · header only`,
-    });
+    );
+
+  const footerParts = [`File size: ${formatBytes(attachment.size)}`];
+  if (stats.unknownCount > 0) {
+    footerParts.push(`${stats.unknownCount} record(s) with unknown flag`);
+  }
+  if (stats.truncated) {
+    footerParts.push(`only first ${stats.parsedCount.toLocaleString("en-US")} records analysed`);
+  }
+  embed.setFooter({ text: footerParts.join(" · ") });
+
+  return embed;
 }
 
 async function handleDisplayCatalog(interaction) {
@@ -209,9 +216,11 @@ async function handleXspInfo(interaction) {
   await interaction.deferReply();
 
   try {
-    const bytes = await fetchXspHeaderBytes(attachment.url, attachment.size);
-    const header = parseXspHeader(bytes);
-    const embed = buildXspEmbed(header, attachment);
+    const { header, stats } = await analyzeXspFile(
+      attachment.url,
+      attachment.size,
+    );
+    const embed = buildXspEmbed(header, stats, attachment);
     await interaction.editReply({ embeds: [embed] });
   } catch (error) {
     console.error(`XSP parse failed for "${attachment.name}":`, error);

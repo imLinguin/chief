@@ -81,17 +81,29 @@ formats, content IDs, and a short per-package breakdown.
 ### `/xspinfo file:<attachment>`
 
 Upload an `.xsp` (MSIXVC streaming patch) file and the bot reports its
-**header** metadata: magic, upgrade-from/to versions, patch record count,
-element count, page size, total download size, disk space required, and the
-GUIDs (content/VDUID, UDUID, build, plan, XSP id).
+**header** metadata (magic, upgrade-from/to versions, patch record count,
+block size, disk space required, and the content/VDUID, UDUID, build, plan and
+XSP GUIDs) plus a **re-use vs download breakdown** computed from the patch
+record table:
 
-Only the header is parsed — the patch records themselves are skipped, since a
-single file can contain a very large number of them. To avoid downloading
-multi-gigabyte patches, the bot fetches only the first few KiB via an HTTP
-range request. The header layout and field semantics follow the
+- **Re-used from install** — data copied from the existing installation
+  (`CopyData` records, `flag == 0x88000000`).
+- **Downloaded** — data fetched fresh (`NewData` records, `flag == 0`).
+
+Each patch record's `length` is a **block/page count** (not bytes); the byte
+totals are `blocks × block size` (block size comes from the header, usually
+4096). The percentages give the re-use ratio.
+
+To stay efficient, the bot only fetches the header page and the record table
+via HTTP range requests — it never downloads the payload blocks. The record
+table is capped at 128 MiB (~8.4M records); if a file exceeds that the embed
+footer notes how many records were analysed.
+
+The layout and field semantics follow the
 [xodus msixvc](https://github.com/xodus-gaming/xodus/blob/main/msixvc/src/xsp.rs)
 implementation (little-endian `#[repr(C, packed)]`; GUIDs decoded like
-`uuid::Uuid::from_bytes_le`).
+`uuid::Uuid::from_bytes_le`; version arrays stored in reverse component
+order).
 
 ## Project layout
 

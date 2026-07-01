@@ -132,30 +132,126 @@ export function parseXspHeader(buf) {
   };
 }
 
+export const XSP_RECORD_SIZE = 16; // bytes per raw XspPatchRecord
+export const XSP_FLAG_NEW = 0x00000000; // NewData: block downloaded fresh
+export const XSP_FLAG_COPY = 0x88000000; // CopyData: block re-used from install
+const DEFAULT_BLOCK_SIZE = 4096;
+
 /**
- * Download just the header bytes of a (potentially very large) XSP file using
- * an HTTP range request, so we never pull the whole patch down.
+ * Parse the patch record table and aggregate how much data is re-used from an
+ * existing install versus downloaded fresh.
  *
- * @param {string} url - The file URL (e.g. a Discord attachment URL).
- * @param {number} [declaredSize] - The known file size, used as a safety cap
- *   when the server ignores the range request.
+ * Each 16-byte record is `#[repr(C, packed)]` little-endian:
+ *   +0x0 u32 source_offset  (old block number for CopyData)
+ *   +0x4 u32 flag           (0 = NewData, 0x88000000 = CopyData)
+ *   +0x8 u32 target_offset  (new block number)
+ *   +0xC u32 length         (block/page count — NOT bytes)
+ *
+ * @param {Buffer} buf - Buffer positioned at the first record.
+ * @param {number} recordCount - Number of records to read.
+ * @param {number} blockSize - Size of one block/page in bytes (usually 4096).
+ */
+export function parseXspRecords(buf, recordCount, blockSize) {
+  const available = Math.floor(buf.length / XSP_RECORD_SIZE);
+  const parsedCount = Math.min(recordCount, available);
+
+  let newBlocks = 0;
+  let copyBlocks = 0;
+  let newCount = 0;
+  let copyCount = 0;
+  let unknownCount = 0;
+
+  for (let i = 0; i < parsedCount; i++) {
+    const off = i * XSP_RECORD_SIZE;
+    const flag = buf.readUInt32LE(off + 4);
+    const length = buf.readUInt32LE(off + 12); // in blocks/pages
+
+    if (flag === XSP_FLAG_NEW) {
+      newBlocks += length;
+      newCount += 1;
+    } else if (flag === XSP_FLAG_COPY) {
+      copyBlocks += length;
+      copyCount += 1;
+    } else {
+      unknownCount += 1;
+    }
+  }
+
+  const downloadedBytes = newBlocks * blockSize;
+  const reusedBytes = copyBlocks * blockSize;
+  const totalBytes = downloadedBytes + reusedBytes;
+
+  return {
+    parsedCount,
+    newCount,
+    copyCount,
+    unknownCount,
+    downloadedBytes,
+    reusedBytes,
+    totalBytes,
+    reuseRatio: totalBytes > 0 ? reusedBytes / totalBytes : 0,
+    truncated: parsedCount < recordCount,
+  };
+}
+
+/**
+ * Fetch a byte range from a URL. Returns the requested slice, transparently
+ * handling servers that ignore the range and return the whole body (200).
+ *
+ * @param {string} url
+ * @param {number} start - Inclusive start offset.
+ * @param {number} end - Inclusive end offset.
  * @returns {Promise<Buffer>}
  */
-export async function fetchXspHeaderBytes(url, declaredSize) {
-  const wanted = 0x1000; // 4 KiB — comfortably covers the 860-byte header
-  const res = await fetch(url, { headers: { Range: `bytes=0-${wanted - 1}` } });
+async function fetchRange(url, start, end) {
+  const res = await fetch(url, { headers: { Range: `bytes=${start}-${end}` } });
   if (!res.ok) {
     throw new Error(`Failed to download file: ${res.status} ${res.statusText}`);
   }
+  const buf = Buffer.from(await res.arrayBuffer());
+  // 206 => body already starts at `start`. 200 => full file, slice it out.
+  return res.status === 206 ? buf : buf.subarray(start, end + 1);
+}
 
-  // If the server honoured the range request we get 206 and a tiny body.
-  // If it returned the whole file (200), guard against huge downloads.
-  const MAX_FULL_DOWNLOAD = 25 * 1024 * 1024; // 25 MiB
-  if (res.status !== 206 && declaredSize && declaredSize > MAX_FULL_DOWNLOAD) {
-    throw new Error(
-      "File is too large and the host did not honour a range request; cannot fetch just the header.",
+/**
+ * Download and analyse an XSP file: parse its header, then parse the patch
+ * record table to compute the re-used vs downloaded data ratio. Only the
+ * header page and the record table are fetched (via range requests), never
+ * the payload blocks themselves.
+ *
+ * @param {string} url - The file URL (e.g. a Discord attachment URL).
+ * @param {number} [declaredSize] - Known file size (safety cap).
+ * @returns {Promise<{ header: object, stats: object }>}
+ */
+export async function analyzeXspFile(url, declaredSize) {
+  // 1. Header page (records begin at header.pageSize, always < 4 KiB in).
+  const headerBuf = await fetchRange(url, 0, 0xfff);
+  const header = parseXspHeader(headerBuf);
+
+  const blockSize = header.pageSize || DEFAULT_BLOCK_SIZE;
+  const recordsStart = header.pageSize;
+  const recordsBytes = header.recordCount * XSP_RECORD_SIZE;
+
+  // 2. Record table. Cap the download so a pathological header can't make us
+  //    pull an unbounded range; note truncation if we hit the cap.
+  const MAX_RECORD_BYTES = 128 * 1024 * 1024; // 128 MiB (~8.4M records)
+  const cap =
+    declaredSize && declaredSize > recordsStart
+      ? Math.min(recordsBytes, declaredSize - recordsStart)
+      : recordsBytes;
+  const wantBytes = Math.min(cap, MAX_RECORD_BYTES);
+
+  let stats;
+  if (wantBytes <= 0) {
+    stats = parseXspRecords(Buffer.alloc(0), header.recordCount, blockSize);
+  } else {
+    const recordsBuf = await fetchRange(
+      url,
+      recordsStart,
+      recordsStart + wantBytes - 1,
     );
+    stats = parseXspRecords(recordsBuf, header.recordCount, blockSize);
   }
 
-  return Buffer.from(await res.arrayBuffer());
+  return { header, stats };
 }
