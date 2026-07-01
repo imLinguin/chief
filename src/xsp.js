@@ -64,9 +64,13 @@ function formatGuidLe(buf, offset) {
   return `${d1}-${d2}-${d3}-${tail.slice(0, 4)}-${tail.slice(4)}`;
 }
 
-/** Format a `[u16; 4]` little-endian version array as "a.b.c.d". */
+/**
+ * Format a `[u16; 4]` little-endian version array as "major.minor.x.build".
+ * The array is stored in reverse component order: the last element is the
+ * major version and the first is the build number, so we read it backwards.
+ */
 function formatVersion(buf, offset) {
-  return [0, 2, 4, 6].map((i) => buf.readUInt16LE(offset + i)).join(".");
+  return [6, 4, 2, 0].map((i) => buf.readUInt16LE(offset + i)).join(".");
 }
 
 /** Read an unsigned 64-bit little-endian value, returning a Number. */
