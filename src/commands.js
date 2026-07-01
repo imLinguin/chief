@@ -30,4 +30,19 @@ export const displaycatalogCommand = new SlashCommandBuilder()
       .setRequired(false),
   );
 
-export const commands = [displaycatalogCommand];
+/**
+ * Slash command: /xspinfo file:<attachment>
+ */
+export const xspinfoCommand = new SlashCommandBuilder()
+  .setName("xspinfo")
+  .setDescription(
+    "Show header metadata for an uploaded XSP (MSIXVC patch) file.",
+  )
+  .addAttachmentOption((option) =>
+    option
+      .setName("file")
+      .setDescription("The .xsp file to inspect.")
+      .setRequired(true),
+  );
+
+export const commands = [displaycatalogCommand, xspinfoCommand];

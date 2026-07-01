@@ -9,6 +9,7 @@ import {
 } from "discord.js";
 import { commands } from "./commands.js";
 import { fetchProduct, summarizeProduct } from "./displaycatalog.js";
+import { fetchXspHeaderBytes, parseXspHeader } from "./xsp.js";
 
 const token = process.env.DISCORD_TOKEN;
 const clientId = process.env.DISCORD_CLIENT_ID;
@@ -105,10 +106,80 @@ client.once(Events.ClientReady, (readyClient) => {
   console.log(`Logged in as ${readyClient.user.tag}.`);
 });
 
-client.on(Events.InteractionCreate, async (interaction) => {
-  if (!interaction.isChatInputCommand()) return;
-  if (interaction.commandName !== "displaycatalog") return;
+/** Human-readable byte size, e.g. 1234567 -> "1.18 MiB". */
+function formatBytes(bytes) {
+  if (!bytes) return "0 B";
+  const units = ["B", "KiB", "MiB", "GiB", "TiB"];
+  const exp = Math.min(
+    Math.floor(Math.log(bytes) / Math.log(1024)),
+    units.length - 1,
+  );
+  const value = bytes / 1024 ** exp;
+  const rounded = exp === 0 ? value : value.toFixed(2);
+  return `${rounded} ${units[exp]} (${bytes.toLocaleString("en-US")} bytes)`;
+}
 
+function buildXspEmbed(header, attachment) {
+  return new EmbedBuilder()
+    .setColor(0x107c10)
+    .setTitle(`XSP header — ${attachment.name}`)
+    .setDescription(`Magic: \`${header.magic}\``)
+    .addFields(
+      {
+        name: "Version",
+        value: `\`${header.upgradeFromVersion}\` → \`${header.upgradeToVersion}\``,
+        inline: false,
+      },
+      {
+        name: "Patch records",
+        value: `\`${header.recordCount.toLocaleString("en-US")}\``,
+        inline: true,
+      },
+      {
+        name: "Elements",
+        value: `\`${header.numberOfElements.toLocaleString("en-US")}\``,
+        inline: true,
+      },
+      {
+        name: "Page size",
+        value: `\`${formatBytes(header.pageSize)}\``,
+        inline: true,
+      },
+      {
+        name: "Total download",
+        value: `\`${formatBytes(header.totalDownload)}\``,
+        inline: true,
+      },
+      {
+        name: "Disk space required",
+        value: `\`${formatBytes(header.diskSpaceRequired)}\``,
+        inline: true,
+      },
+      {
+        name: "Next block size",
+        value: `\`${formatBytes(header.nextBlockSize)}\``,
+        inline: true,
+      },
+      {
+        name: "Content ID (VDUID)",
+        value: `\`${header.contentId}\``,
+        inline: false,
+      },
+      {
+        name: "Update Domain ID (UDUID)",
+        value: `\`${header.updateDomainId}\``,
+        inline: false,
+      },
+      { name: "Build ID", value: `\`${header.buildId}\``, inline: false },
+      { name: "Plan ID", value: `\`${header.planId}\``, inline: false },
+      { name: "XSP ID", value: `\`${header.xspId}\``, inline: false },
+    )
+    .setFooter({
+      text: `File size: ${formatBytes(attachment.size)} · header only`,
+    });
+}
+
+async function handleDisplayCatalog(interaction) {
   const productId = interaction.options.getString("id", true).trim();
   const market = (
     interaction.options.getString("market") || DEFAULT_MARKET
@@ -120,10 +191,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
   await interaction.deferReply();
 
   try {
-    const data = await fetchProduct(productId, {
-      market,
-      languages: language,
-    });
+    const data = await fetchProduct(productId, { market, languages: language });
     const summary = summarizeProduct(data);
     const embed = buildEmbed(summary, { market, language });
     await interaction.editReply({ embeds: [embed] });
@@ -132,6 +200,37 @@ client.on(Events.InteractionCreate, async (interaction) => {
     await interaction.editReply({
       content: `⚠️ ${error.message ?? "Something went wrong while querying DisplayCatalog."}`,
     });
+  }
+}
+
+async function handleXspInfo(interaction) {
+  const attachment = interaction.options.getAttachment("file", true);
+
+  await interaction.deferReply();
+
+  try {
+    const bytes = await fetchXspHeaderBytes(attachment.url, attachment.size);
+    const header = parseXspHeader(bytes);
+    const embed = buildXspEmbed(header, attachment);
+    await interaction.editReply({ embeds: [embed] });
+  } catch (error) {
+    console.error(`XSP parse failed for "${attachment.name}":`, error);
+    await interaction.editReply({
+      content: `⚠️ ${error.message ?? "Could not read the XSP header."}`,
+    });
+  }
+}
+
+client.on(Events.InteractionCreate, async (interaction) => {
+  if (!interaction.isChatInputCommand()) return;
+
+  switch (interaction.commandName) {
+    case "displaycatalog":
+      return handleDisplayCatalog(interaction);
+    case "xspinfo":
+      return handleXspInfo(interaction);
+    default:
+      return;
   }
 });
 

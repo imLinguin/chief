@@ -78,11 +78,27 @@ Options:
 The bot replies with an embed listing the product title, platforms, package
 formats, content IDs, and a short per-package breakdown.
 
+### `/xspinfo file:<attachment>`
+
+Upload an `.xsp` (MSIXVC streaming patch) file and the bot reports its
+**header** metadata: magic, upgrade-from/to versions, patch record count,
+element count, page size, total download size, disk space required, and the
+GUIDs (content/VDUID, UDUID, build, plan, XSP id).
+
+Only the header is parsed — the patch records themselves are skipped, since a
+single file can contain a very large number of them. To avoid downloading
+multi-gigabyte patches, the bot fetches only the first few KiB via an HTTP
+range request. The header layout and field semantics follow the
+[xodus msixvc](https://github.com/xodus-gaming/xodus/blob/main/msixvc/src/xsp.rs)
+implementation (little-endian `#[repr(C, packed)]`; GUIDs decoded like
+`uuid::Uuid::from_bytes_le`).
+
 ## Project layout
 
 | File | Purpose |
 | ---- | ------- |
 | `src/displaycatalog.js` | DisplayCatalog API client + response summariser |
-| `src/commands.js`       | Slash command definition |
+| `src/xsp.js`            | XSP header parser + ranged header download |
+| `src/commands.js`       | Slash command definitions |
 | `src/index.js`          | Bot entry point + interaction handling |
 | `src/deploy-commands.js`| Standalone slash command registration script |
